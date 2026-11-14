@@ -28,20 +28,35 @@ def number(x, digits=2):
     return round(float(x), digits)
 
 def load_report(path, now):
+    """Legge il report mattutino già calcolato, anche quando la neve è N/D."""
     if not path.exists() or path.stat().st_size > 100000:
         return {}
     if now.timestamp() - path.stat().st_mtime > 22 * 3600:
         return {}
     results = {}
-    pattern = r'^\s*(\S+)\s+finale\s+.*?\| meteo\s+(\d+).*?\|.*?neve\s+(\d+)%\s+\| nuova\s+([\d.]+)cm'
     for line in path.read_text(errors="replace").splitlines():
-        m = re.search(pattern, line)
-        if m and m.group(1) in NAMES:
-            results[m.group(1)] = {
-                "weather_score": int(m.group(2)),
-                "snow_pct": int(m.group(3)),
-                "fresh_cm": float(m.group(4)),
-            }
+        head = re.match(r"^\s*([a-z_]+)\s+finale\b", line)
+        if not head or head.group(1) not in NAMES:
+            continue
+        fields = {}
+        for field in line.split("|")[1:]:
+            field = field.strip()
+            for key, pattern in (
+                ("weather_score", r"^meteo\s+(\d{1,3})\b"),
+                ("snow_pct", r"^neve\s+(\d{1,3})%"),
+                ("fresh_cm", r"^nuova\s+([\d.,]+)\s*cm\b"),
+            ):
+                match = re.match(pattern, field, re.I)
+                if match:
+                    value = float(match.group(1).replace(",", ".")) if key == "fresh_cm" else int(match.group(1))
+                    if key == "weather_score" and not 0 <= value <= 100:
+                        continue
+                    if key == "snow_pct" and not 0 <= value <= 100:
+                        continue
+                    if key == "fresh_cm" and not 0 <= value <= 300:
+                        continue
+                    fields[key] = value
+        results[head.group(1)] = fields
     return results
 
 def load_night_rigelo(base):
@@ -80,7 +95,7 @@ def load_night_rigelo(base):
         if not 0 <= score <= 100:
             continue
         minimum = re.search(
-            r"\bmin\s*([+-]?\d+(?:[.,]\d+)?)\s*°?\s*C\b",
+            r"\bmin\s*([+-]?\d+(?:[.,]\d+)?)\s*°?\s*C?(?=\s*\||\s|$)",
             line, re.I
         )
         below = re.search(r"\bsottozero\s*(\d{1,3})\s*%", line, re.I)
