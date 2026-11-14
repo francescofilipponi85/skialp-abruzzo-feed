@@ -1,0 +1,23 @@
+name: Validate SkiAlp feed bridge
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'bridge/**'
+      - 'tests/**'
+      - '.github/workflows/validate-bridge.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile bridge
+        run: python -m compileall -q bridge
+      - name: Test export
+        run: python -m unittest discover -s tests -v
