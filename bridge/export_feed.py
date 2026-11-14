@@ -172,31 +172,40 @@ def load_thermal_morning(now):
     return result
 
 def load_night_crust(base, now):
-    """Nota prudenziale sulle condizioni per crosta da ricostruzione modellistica notturna.
-    Non costituisce un'osservazione di crosta realmente presente.
+    """Dati di nebbia gelata/crosta dal report notturno MODELLISTICO, non osservazioni.
+
+    Un'assenza di indizi nel modello NON esclude nebbia gelata e crosta reali.
+    Non calcola un nuovo indice di sicurezza e non considera le nubi basse
+    equivalenti a nebbia.
     """
     path = base / "data/nubi_notte_latest.txt"
     if not recent_file(path, now, 28):
         return {}
     lines = path.read_text(errors="replace").splitlines()
-    if not any("RISCHIO CROSTA" in line.upper() and "RICOSTRUZIONE" in line.upper()
-               for line in lines[:8]):
+    header = next(
+        (line for line in lines[:8] if
+         "RISCHIO CROSTA" in line.upper() and "RICOSTRUZIONE" in line.upper()),
+        None,
+    )
+    if header is None:
         return {}
+    night_period = header.split("|")[1].strip()[:90] if "|" in header else None
     result = {}
     for line in lines:
         m = re.match(r"^\s*([a-z_]+)\s*:\s*(.+)$", line)
         if not m or m.group(1) not in NAMES:
             continue
         zone, details = m.group(1), m.group(2)
-        clauses = [
-            item.strip().rstrip(".")
-            for item in details.split(";")
-            if "crosta" in item.lower() or "nebbia gelata" in item.lower()
-        ]
-        if not clauses:
+        clauses = [item.strip().rstrip(".") for item in details.split(";")]
+        fog_clause = next((x for x in clauses if "nebbia gelata" in x.lower()), None)
+        crust_clause = next((x for x in clauses if "crosta" in x.lower()), None)
+        if not fog_clause and not crust_clause:
             continue
         payload = {
-            "crust_model_note": "; ".join(clauses)[:240],
+            "crust_model_note": "; ".join(x for x in (fog_clause, crust_clause) if x)[:400],
+            "crust_fog_signal": fog_clause[:230] if fog_clause else None,
+            "crust_surface_note": crust_clause[:230] if crust_clause else None,
+            "crust_model_night_period": night_period,
             "crust_model_updated_utc": datetime.fromtimestamp(
                 path.stat().st_mtime, UTC).isoformat(),
         }
@@ -205,11 +214,15 @@ def load_night_crust(base, now):
             ("crust_total_cloud_pct", r"\bnubi tot\s+(\d{1,3})\s*%", 0, 100),
             ("crust_humidity_pct", r"\bUR\s+(\d{1,3})\s*%", 0, 100),
             ("crust_night_air_min_c", r"\bTmin aria\s+([+-]?[\d.,]+)\s*°C", -50, 40),
+            ("crust_hours_low_cloud_75", r"\(\s*(\d{1,2})\s*/\s*\d{1,2}\s*h\s*>=\s*75%\s*\)", 0, 24),
+            ("crust_hours_total", r"\(\s*\d{1,2}\s*/\s*(\d{1,2})\s*h\s*>=\s*75%\s*\)", 1, 24),
+            ("crust_visibility_below_1km_hours",
+             r"\bvisibilita\s*:\s*(\d{1,2})\s*h\s+con\s+visibilita", 0, 24),
         ):
-            v = field_number(details, pattern, low, high,
-                             decimal=key == "crust_night_air_min_c")
-            if v is not None:
-                payload[key] = v
+            value = field_number(details, pattern, low, high,
+                                 decimal=key == "crust_night_air_min_c")
+            if value is not None:
+                payload[key] = value
         result[zone] = payload
     return result
 
@@ -339,6 +352,12 @@ def export(base, dest):
                 "crust_total_cloud_pct": crust.get(zone_id, {}).get("crust_total_cloud_pct"),
                 "crust_humidity_pct": crust.get(zone_id, {}).get("crust_humidity_pct"),
                 "crust_night_air_min_c": crust.get(zone_id, {}).get("crust_night_air_min_c"),
+                "crust_fog_signal": crust.get(zone_id, {}).get("crust_fog_signal"),
+                "crust_surface_note": crust.get(zone_id, {}).get("crust_surface_note"),
+                "crust_model_night_period": crust.get(zone_id, {}).get("crust_model_night_period"),
+                "crust_hours_low_cloud_75": crust.get(zone_id, {}).get("crust_hours_low_cloud_75"),
+                "crust_hours_total": crust.get(zone_id, {}).get("crust_hours_total"),
+                "crust_visibility_below_1km_hours": crust.get(zone_id, {}).get("crust_visibility_below_1km_hours"),
                 "history": [{"at": r[0], "temp_c": number(r[1])} for r in valid[-24:]],
             })
     payload = {
