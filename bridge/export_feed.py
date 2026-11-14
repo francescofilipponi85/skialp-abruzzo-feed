@@ -59,6 +59,72 @@ def load_report(path, now):
         results[head.group(1)] = fields
     return results
 
+
+def recent_file(path, now, max_age_hours=26):
+    """Non usare report meteorologici vecchi: N/D in caso di file assente/scaduto."""
+    try:
+        age = now.timestamp() - path.stat().st_mtime
+        return path.is_file() and 0 <= age <= max_age_hours * 3600 and path.stat().st_size < 150000
+    except OSError:
+        return False
+
+def field_number(line, pattern, low=0, high=100, decimal=False):
+    m = re.search(pattern, line, re.I)
+    if not m:
+        return None
+    try:
+        n = float(m.group(1).replace(",", ".")) if decimal else int(m.group(1))
+        return n if low <= n <= high else None
+    except (TypeError, ValueError):
+        return None
+
+def load_morning_cache(base, now):
+    """Meteo e neve già elaborati dagli script delle 07, senza query di rete aggiuntive."""
+    cache = Path("/tmp/skialp_morning_cache")
+    data = {k: {} for k in NAMES}
+    weather_path = cache / "weather.txt"
+    if recent_file(weather_path, now):
+        for line in weather_path.read_text(errors="replace").splitlines():
+            m = re.match(r"^\s*(\d{1,3})\s*/100\s+([a-z_]+)\b", line)
+            if not m or m.group(2) not in data:
+                continue
+            zone, score = m.group(2), int(m.group(1))
+            if 0 <= score <= 100:
+                data[zone]["weather_score"] = score
+            for key, pat, upper in (
+                ("sky_score", r"\bcielo\s+(\d{1,3})\b", 100),
+                ("wind_score", r"\bvento\s+(\d{1,3})\b", 100),
+                ("max_gust_kmh", r"\braffica\s+([\d.,]+)", 250),
+                ("sky_min_score", r"\bcielo_min\s+([\d.,]+)", 100),
+            ):
+                value = field_number(line, pat, 0, upper,
+                                     decimal=key in ("max_gust_kmh", "sky_min_score"))
+                if value is not None:
+                    data[zone][key] = value
+            data[zone]["weather_updated_utc"] = datetime.fromtimestamp(
+                weather_path.stat().st_mtime, UTC).isoformat()
+    snow_path = cache / "snow.txt"
+    if recent_file(snow_path, now):
+        for line in snow_path.read_text(errors="replace").splitlines():
+            m = re.match(r"^\s*([a-z_]+)\s+neve\b", line)
+            if not m or m.group(1) not in data:
+                continue
+            zone = m.group(1)
+            confidence = field_number(line, r"\baffid\s+(\d{1,3})\s*%", 0, 100)
+            data[zone]["snow_confidence_pct"] = confidence
+            # Affidabilità zero: mai scambiare assenza del dato per assenza di neve.
+            if confidence is None or confidence == 0:
+                continue
+            snow = field_number(line, r"\bneve\s+(\d{1,3})\s*%", 0, 100)
+            cloud = field_number(line, r"\bnubi\s+(\d{1,3})\s*%", 0, 100)
+            fresh = field_number(line, r"\bnuova(?:24h)?(?:\s+max)?\s+([\d.,]+)\s*cm", 0, 300, True)
+            if snow is not None: data[zone]["snow_pct"] = snow
+            if cloud is not None: data[zone]["snow_cloud_pct"] = cloud
+            if fresh is not None: data[zone]["fresh_cm"] = fresh
+            data[zone]["snow_updated_utc"] = datetime.fromtimestamp(
+                snow_path.stat().st_mtime, UTC).isoformat()
+    return data
+
 def load_night_rigelo(base):
     """Legge il rigelo calcolato dal motore SkiAlp, senza ricalcolarlo.
     
@@ -118,6 +184,7 @@ def export(base, dest):
     if metpath.is_file() and now.timestamp() - metpath.stat().st_mtime < 22 * 3600:
         meteo = json.loads(metpath.read_text())
     report = load_report(base / "data/report_latest.txt", now)
+    morning = load_morning_cache(base, now)
     night_rigelo = load_night_rigelo(base)
     night_end = now.astimezone(ROME).replace(hour=7, minute=0, second=0, microsecond=0)
     if now.astimezone(ROME) < night_end:
@@ -139,11 +206,14 @@ def export(base, dest):
             rigelo = night_rigelo.get(zone_id, {})
             mm = meteo.get(zone_id, {}) if isinstance(meteo, dict) else {}
             danger = mm.get("danger") if isinstance(mm, dict) else None
-            if not isinstance(danger, (int, float)) or not 0 <= danger <= 5:
+            if isinstance(danger, bool) or not isinstance(danger, (int, float)) or not 1 <= danger <= 5:
                 danger = None
             else:
                 danger = int(danger)
-            weather = report.get(zone_id, {})
+            weather = {**report.get(zone_id, {}), **morning.get(zone_id, {})}
+            if weather.get("snow_confidence_pct") == 0:
+                weather["snow_pct"] = None
+                weather["fresh_cm"] = None
             zones.append({
                 "id": zone_id, "name": name,
                 "temp_c": number(last[1]) if last else None,
@@ -155,9 +225,20 @@ def export(base, dest):
                 "subzero_pct": rigelo.get("subzero_pct"),
                 "freeze_night_end_local": night_end.isoformat() if rigelo else None,
                 "snow_pct": weather.get("snow_pct"),
+                "snow_confidence_pct": weather.get("snow_confidence_pct"),
+                "snow_cloud_pct": weather.get("snow_cloud_pct"),
+                "snow_updated_utc": weather.get("snow_updated_utc"),
                 "fresh_cm": weather.get("fresh_cm"),
                 "avalanche_danger": danger,
+                "avalanche_label": (str(mm.get("label"))[:90] if mm.get("label") else None) if isinstance(mm, dict) else None,
+                "avalanche_situation": (str(mm.get("situation"))[:450] if mm.get("situation") else None) if isinstance(mm, dict) else None,
+                "avalanche_updated_utc": datetime.fromtimestamp(metpath.stat().st_mtime, UTC).isoformat() if danger and recent_file(metpath, now, 22) else None,
                 "weather_score": weather.get("weather_score"),
+                "sky_score": weather.get("sky_score"),
+                "wind_score": weather.get("wind_score"),
+                "max_gust_kmh": weather.get("max_gust_kmh"),
+                "sky_min_score": weather.get("sky_min_score"),
+                "weather_updated_utc": weather.get("weather_updated_utc"),
                 "history": [{"at": r[0], "temp_c": number(r[1])} for r in valid[-24:]],
             })
     payload = {
