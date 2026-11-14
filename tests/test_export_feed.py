@@ -71,17 +71,17 @@ class TestExport(unittest.TestCase):
             source = base / "data/nubi_notte_latest.txt"
             source.write_text(
                 "NUVOLOSITA NOTTURNA E RISCHIO CROSTA | 14/11 18:00 - 15/11 07:00 "
-                "| RICOSTRUZIONE DA MODELLO (NON osservazioni)\\n"
+                "| RICOSTRUZIONE DA MODELLO (NON osservazioni)\n"
                 "gran_sasso_ovest: nubi basse 83% (8/13 h >=75%); "
                 "nubi tot 88%; UR 97%; Tmin aria -3.4°C; "
                 "visibilita: 6 h con visibilita modellistica <1 km; "
                 "Possibili condizioni di nebbia gelata; crosta comunque non esclusa. "
-                "[nubi ICON-2I; vis ncep_gfs_seamless]\\n"
+                "[nubi ICON-2I; vis ncep_gfs_seamless]\n"
                 "gran_sasso_est: nubi basse 1% (0/13 h >=75%); "
                 "nubi tot 4%; UR 77%; Tmin aria 4.7°C; "
                 "visibilita: 0 h con visibilita modellistica <1 km; "
                 "Nessun segnale forte di nebbia gelata; crosta comunque non esclusa. "
-                "[nubi ICON-2I; vis ncep_gfs_seamless]\\n"
+                "[nubi ICON-2I; vis ncep_gfs_seamless]\n"
             )
             now = datetime.now(timezone.utc)
             got = export_feed.load_night_crust(base, now)
@@ -93,7 +93,7 @@ class TestExport(unittest.TestCase):
             self.assertEqual(got["gran_sasso_ovest"]["crust_night_air_min_c"], -3.4)
             self.assertIn("Possibili condizioni", got["gran_sasso_ovest"]["crust_fog_signal"])
             self.assertIn("crosta comunque non esclusa", got["gran_sasso_est"]["crust_surface_note"])
-            source.write_text("NESSUN DATO NOTTURNO\\n")
+            source.write_text("NESSUN DATO NOTTURNO\n")
             self.assertEqual(export_feed.load_night_crust(base, now), {})
 
     def test_no_night_script_is_nd(self):
