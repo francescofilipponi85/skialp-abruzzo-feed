@@ -5,6 +5,8 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -42,6 +44,55 @@ def load_report(path, now):
             }
     return results
 
+def load_night_rigelo(base):
+    """Legge il rigelo calcolato dal motore SkiAlp, senza ricalcolarlo.
+    
+    Se la notte è incompleta o lo script non è disponibile, non pubblica
+    un valore inventato: i campi rimangono null.
+    """
+    script = base / "collector/skialp_raster.py"
+    if not script.is_file():
+        return {}
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(script), "night"],
+            cwd=str(base),
+            capture_output=True,
+            text=True,
+            timeout=45,
+            check=False,
+        )
+        if proc.returncode != 0:
+            print("ATTENZIONE: rigelo non disponibile (comando night fallito)", file=sys.stderr)
+            return {}
+    except (OSError, subprocess.TimeoutExpired):
+        print("ATTENZIONE: rigelo non disponibile (timeout/errore avvio)", file=sys.stderr)
+        return {}
+    result = {}
+    for line in proc.stdout.splitlines():
+        match = re.match(
+            r"^\s*([a-z_]+)\s+rigelo\s+(\d{1,3})\s*/\s*100\b",
+            line, flags=re.I
+        )
+        if not match or match.group(1) not in NAMES:
+            continue
+        score = int(match.group(2))
+        if not 0 <= score <= 100:
+            continue
+        minimum = re.search(
+            r"\bmin\s*([+-]?\d+(?:[.,]\d+)?)\s*°?\s*C\b",
+            line, re.I
+        )
+        below = re.search(r"\bsottozero\s*(\d{1,3})\s*%", line, re.I)
+        result[match.group(1)] = {
+            "freeze_score": score,
+            "night_min_c": number(float(minimum.group(1).replace(",", ".")))
+                           if minimum else None,
+            "subzero_pct": int(below.group(1))
+                           if below and int(below.group(1)) <= 100 else None,
+        }
+    return result
+
 def export(base, dest):
     now = datetime.now(UTC)
     dbpath = base / "data/raster_temps.sqlite"
@@ -52,10 +103,10 @@ def export(base, dest):
     if metpath.is_file() and now.timestamp() - metpath.stat().st_mtime < 22 * 3600:
         meteo = json.loads(metpath.read_text())
     report = load_report(base / "data/report_latest.txt", now)
-    end = now.astimezone(ROME).replace(hour=7, minute=0, second=0, microsecond=0)
-    if now.astimezone(ROME) < end:
-        end -= timedelta(days=1)
-    start = end - timedelta(hours=11)
+    night_rigelo = load_night_rigelo(base)
+    night_end = now.astimezone(ROME).replace(hour=7, minute=0, second=0, microsecond=0)
+    if now.astimezone(ROME) < night_end:
+        night_end -= timedelta(days=1)
     cutoff = (now - timedelta(hours=24)).isoformat()
     zones = []
     with sqlite3.connect("file:" + str(dbpath) + "?mode=ro", uri=True, timeout=15) as db:
@@ -70,21 +121,7 @@ def export(base, dest):
             ).fetchall()
             valid = [r for r in rows if r[4] == "OK"]
             last = valid[-1] if valid else None
-            night = []
-            for at, temp, altitude, gradient, note in valid:
-                t = datetime.fromisoformat(at).astimezone(ROME)
-                if start <= t < end:
-                    night.append((t, float(temp)))
-            unique = len({t.replace(minute=0, second=0, microsecond=0) for t, _ in night})
-            contiguous = all(
-                timedelta(0) < b[0] - a[0] <= timedelta(hours=2)
-                for a, b in zip(night, night[1:])
-            )
-            sufficient = unique >= 8 and contiguous
-            values = [temp for _, temp in night]
-            below = sum(t <= 0 for t in values) / len(values) if sufficient else None
-            min_temp = min(values) if sufficient else None
-            freeze = min(100, round(below * 70 + max(0, min(30, -min_temp * 6)))) if sufficient else None
+            rigelo = night_rigelo.get(zone_id, {})
             mm = meteo.get(zone_id, {}) if isinstance(meteo, dict) else {}
             danger = mm.get("danger") if isinstance(mm, dict) else None
             if not isinstance(danger, (int, float)) or not 0 <= danger <= 5:
@@ -98,9 +135,10 @@ def export(base, dest):
                 "elevation_m": round(last[2]) if last else None,
                 "gradient_c_per_100m": number(last[3], 3) if last and last[3] is not None else None,
                 "observed_at_utc": last[0] if last else None,
-                "freeze_score": freeze,
-                "night_min_c": number(min_temp),
-                "subzero_pct": round(below * 100) if below is not None else None,
+                "freeze_score": rigelo.get("freeze_score"),
+                "night_min_c": rigelo.get("night_min_c"),
+                "subzero_pct": rigelo.get("subzero_pct"),
+                "freeze_night_end_local": night_end.isoformat() if rigelo else None,
                 "snow_pct": weather.get("snow_pct"),
                 "fresh_cm": weather.get("fresh_cm"),
                 "avalanche_danger": danger,
