@@ -171,6 +171,48 @@ def load_thermal_morning(now):
                     profile.stat().st_mtime, UTC).isoformat()
     return result
 
+def load_night_crust(base, now):
+    """Nota prudenziale sulle condizioni per crosta da ricostruzione modellistica notturna.
+    Non costituisce un'osservazione di crosta realmente presente.
+    """
+    path = base / "data/nubi_notte_latest.txt"
+    if not recent_file(path, now, 28):
+        return {}
+    lines = path.read_text(errors="replace").splitlines()
+    if not any("RISCHIO CROSTA" in line.upper() and "RICOSTRUZIONE" in line.upper()
+               for line in lines[:8]):
+        return {}
+    result = {}
+    for line in lines:
+        m = re.match(r"^\s*([a-z_]+)\s*:\s*(.+)$", line)
+        if not m or m.group(1) not in NAMES:
+            continue
+        zone, details = m.group(1), m.group(2)
+        clauses = [
+            item.strip().rstrip(".")
+            for item in details.split(";")
+            if "crosta" in item.lower() or "nebbia gelata" in item.lower()
+        ]
+        if not clauses:
+            continue
+        payload = {
+            "crust_model_note": "; ".join(clauses)[:240],
+            "crust_model_updated_utc": datetime.fromtimestamp(
+                path.stat().st_mtime, UTC).isoformat(),
+        }
+        for key, pattern, low, high in (
+            ("crust_low_cloud_pct", r"\bnubi basse\s+(\d{1,3})\s*%", 0, 100),
+            ("crust_total_cloud_pct", r"\bnubi tot\s+(\d{1,3})\s*%", 0, 100),
+            ("crust_humidity_pct", r"\bUR\s+(\d{1,3})\s*%", 0, 100),
+            ("crust_night_air_min_c", r"\bTmin aria\s+([+-]?[\d.,]+)\s*°C", -50, 40),
+        ):
+            v = field_number(details, pattern, low, high,
+                             decimal=key == "crust_night_air_min_c")
+            if v is not None:
+                payload[key] = v
+        result[zone] = payload
+    return result
+
 def load_night_rigelo(base):
     """Legge il rigelo calcolato dal motore SkiAlp, senza ricalcolarlo.
     
@@ -232,6 +274,7 @@ def export(base, dest):
     report = load_report(base / "data/report_latest.txt", now)
     morning = load_morning_cache(base, now)
     thermal = load_thermal_morning(now)
+    crust = load_night_crust(base, now)
     night_rigelo = load_night_rigelo(base)
     night_end = now.astimezone(ROME).replace(hour=7, minute=0, second=0, microsecond=0)
     if now.astimezone(ROME) < night_end:
@@ -290,6 +333,12 @@ def export(base, dest):
                 "inversion_pct": thermal[zone_id].get("inversion_pct"),
                 "temperature_profile_c": thermal[zone_id].get("temperature_profile_c"),
                 "thermal_profile_updated_utc": thermal[zone_id].get("thermal_profile_updated_utc"),
+                "crust_model_note": crust.get(zone_id, {}).get("crust_model_note"),
+                "crust_model_updated_utc": crust.get(zone_id, {}).get("crust_model_updated_utc"),
+                "crust_low_cloud_pct": crust.get(zone_id, {}).get("crust_low_cloud_pct"),
+                "crust_total_cloud_pct": crust.get(zone_id, {}).get("crust_total_cloud_pct"),
+                "crust_humidity_pct": crust.get(zone_id, {}).get("crust_humidity_pct"),
+                "crust_night_air_min_c": crust.get(zone_id, {}).get("crust_night_air_min_c"),
                 "history": [{"at": r[0], "temp_c": number(r[1])} for r in valid[-24:]],
             })
     payload = {
